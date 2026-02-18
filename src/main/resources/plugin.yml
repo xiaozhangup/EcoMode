@@ -1,9 +1,9 @@
-name: RIABandwidthSaver
-version: '${project.version}'
+name: EcoMode
+version: 1.2.3
 main: com.ghostchu.plugins.riabandwidthsaver.RIABandwidthSaver
 api-version: '1.20'
 depend:
-  - ProtocolLib
+  - packetevents
 softdepend:
   - CMI
   - Essentials

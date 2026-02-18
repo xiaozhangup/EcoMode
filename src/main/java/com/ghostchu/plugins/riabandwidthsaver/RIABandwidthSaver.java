@@ -1,13 +1,16 @@
 package com.ghostchu.plugins.riabandwidthsaver;
 
-import com.comphenix.protocol.PacketType;
-import com.comphenix.protocol.ProtocolLibrary;
-import com.comphenix.protocol.events.*;
-import com.comphenix.protocol.injector.temporary.TemporaryPlayer;
 import com.ghostchu.plugins.riabandwidthsaver.hooks.cmi.CMIHook;
 import com.ghostchu.plugins.riabandwidthsaver.hooks.essx.ESSXHook;
+import com.ghostchu.plugins.riabandwidthsaver.hooks.look.LookHook;
+import com.github.retrooper.packetevents.PacketEvents;
+import com.github.retrooper.packetevents.event.PacketListenerAbstract;
+import com.github.retrooper.packetevents.event.PacketListenerPriority;
+import com.github.retrooper.packetevents.event.PacketSendEvent;
+import com.github.retrooper.packetevents.protocol.packettype.PacketType;
+import com.github.retrooper.packetevents.protocol.player.User;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSetSlot;
 import io.netty.buffer.ByteBuf;
-import io.netty.util.ReferenceCountUtil;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.command.Command;
@@ -19,20 +22,21 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.jetbrains.annotations.NotNull;
+import org.jspecify.annotations.NonNull;
 
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 public final class RIABandwidthSaver extends JavaPlugin implements Listener {
     private final Set<UUID> AFK_PLAYERS = new HashSet<>();
-    private final Map<PacketType, PacketInfo> PKT_TYPE_STATS = new ConcurrentHashMap<>();
+    private final Map<PacketType.Play.Server, PacketInfo> PKT_TYPE_STATS = new ConcurrentHashMap<>();
     private final Map<UUID, PacketInfo> PLAYER_PKT_SAVED_STATS = new ConcurrentHashMap<>();
-    private final Map<PacketType, PacketInfo> UNFILTERED_PKT_TYPE_STATS = new ConcurrentHashMap<>();
+    private final Map<PacketType.Play.Server, PacketInfo> UNFILTERED_PKT_TYPE_STATS = new ConcurrentHashMap<>();
     private final Map<UUID, PacketInfo> UNFILTERED_PLAYER_PKT_SAVED_STATS = new ConcurrentHashMap<>();
     private final ThreadLocalRandom RANDOM = ThreadLocalRandom.current();
     private boolean calcAllPackets = false;
+    private PacketCalcListener listenerCale = null;
+    private PacketListener listener = null;
     private final ExecutorService EXECUTOR_SERVICE = Executors.newSingleThreadExecutor();
     private final List<AFKHook> afkHooks = new ArrayList<>();
 
@@ -58,8 +62,7 @@ public final class RIABandwidthSaver extends JavaPlugin implements Listener {
             getLogger().warning("存在多个 AFK 状态源钩子，这可能会导致问题。请只选择一个使用，并关闭其它插件的 AFK 功能以规避问题，如已关闭可忽略此提示");
         }
         if(afkHooks.isEmpty()){
-            getLogger().severe("未检测到任何支持的 AFK 状态钩子，插件退出……");
-            Bukkit.getPluginManager().disablePlugin(this);
+            afkHooks.add(new LookHook(this));
         }
     }
 
@@ -67,140 +70,35 @@ public final class RIABandwidthSaver extends JavaPlugin implements Listener {
     public void reloadConfig() {
         super.reloadConfig();
         this.calcAllPackets = getConfig().getBoolean("calcAllPackets", true);
-        ProtocolLibrary.getProtocolManager().removePacketListeners(this);
+        if (listenerCale != null) {
+            PacketEvents.getAPI().getEventManager().unregisterListener(listenerCale);
+        }
+        if (listener != null) {
+            PacketEvents.getAPI().getEventManager().unregisterListener(listener);
+        }
         initProtocolLib();
     }
 
     private void initProtocolLib() {
         if (calcAllPackets) {
-            List<PacketType> types = new ArrayList<>();
-            for (PacketType value : PacketType.values()) {
-                if (value.isServer() && value.isSupported()) {
-                    types.add(value);
-                }
-            }
-            ProtocolLibrary.getProtocolManager().addPacketListener(new PacketAdapter(
-                    this,
-                    ListenerPriority.MONITOR,
-                    types, ListenerOptions.ASYNC) {
-                @Override
-                public void onPacketSending(PacketEvent event) {
-                    PacketContainer container = event.getPacket().shallowClone();
-                    CompletableFuture.runAsync(() -> {
-                        long packetSize = getPacketSize(container);
-                        UNFILTERED_PKT_TYPE_STATS.compute(event.getPacketType(), (k, v) -> {
-                            if (v == null) {
-                                v = new PacketInfo();
-                            }
-                            v.getPktCounter().increment();
-                            v.getPktSize().add(packetSize);
-                            return v;
-                        });
-                        if (!(event.getPlayer() instanceof TemporaryPlayer)) {
-                            UNFILTERED_PLAYER_PKT_SAVED_STATS.compute(event.getPlayer().getUniqueId(), (k, v) -> {
-                                if (v == null) {
-                                    v = new PacketInfo();
-                                }
-                                v.getPktCounter().increment();
-                                v.getPktSize().add(packetSize);
-                                return v;
-                            });
-                        }
-                    }, EXECUTOR_SERVICE);
-                }
-            });
+            listenerCale = new PacketCalcListener();
+            PacketEvents.getAPI().getEventManager().registerListener(listenerCale);
         } else {
             UNFILTERED_PLAYER_PKT_SAVED_STATS.clear();
             UNFILTERED_PKT_TYPE_STATS.clear();
         }
-        ProtocolLibrary.getProtocolManager().addPacketListener(new PacketAdapter(
-                this,
-                ListenerPriority.HIGHEST,
-                Stream.of(
-                        PacketType.Play.Server.ANIMATION,
-                        PacketType.Play.Server.BLOCK_BREAK_ANIMATION,
-                        PacketType.Play.Server.ENTITY_SOUND,
-                        PacketType.Play.Server.NAMED_SOUND_EFFECT,
-                        PacketType.Play.Server.WORLD_PARTICLES,
-                        PacketType.Play.Server.EXPLOSION,
-                        PacketType.Play.Server.UPDATE_TIME,
-                        PacketType.Play.Server.ENTITY_HEAD_ROTATION,
-                        PacketType.Play.Server.HURT_ANIMATION,
-                        PacketType.Play.Server.DAMAGE_EVENT,
-                        PacketType.Play.Server.ENTITY_LOOK,
-                        PacketType.Play.Server.REL_ENTITY_MOVE,
-                        PacketType.Play.Server.REL_ENTITY_MOVE_LOOK,
-                        PacketType.Play.Server.SPAWN_ENTITY_EXPERIENCE_ORB,
-                        PacketType.Play.Server.VEHICLE_MOVE,
-                        PacketType.Play.Server.BLOCK_ACTION,
-                        PacketType.Play.Server.LIGHT_UPDATE,
-                        PacketType.Play.Server.LOOK_AT,
-                        PacketType.Play.Server.PLAYER_LIST_HEADER_FOOTER,
-                        PacketType.Play.Server.WORLD_EVENT,
-                        PacketType.Play.Server.COLLECT,
-                        PacketType.Play.Server.ENTITY_EFFECT).filter(PacketType::isSupported).collect(Collectors.toList()), ListenerOptions.ASYNC) {
-            @Override
-            public void onPacketSending(PacketEvent event) {
-                UUID uuid = event.getPlayer().getUniqueId();
-                if (!AFK_PLAYERS.contains(uuid)) {
-                    return;
-                }
-                PacketType type = event.getPacketType();
-                if (type == PacketType.Play.Server.REL_ENTITY_MOVE
-                        || type == PacketType.Play.Server.VEHICLE_MOVE
-                        || type == PacketType.Play.Server.REL_ENTITY_MOVE_LOOK
-                        || type == PacketType.Play.Server.SPAWN_ENTITY_EXPERIENCE_ORB) {
-                    if (RANDOM.nextInt(3) > 0) {
-                        return;
-                    }
-                }
-                if (type == PacketType.Play.Server.SET_SLOT) {
-                    Byte windowId = event.getPacket().getBytes().readSafely(0);
-                    if (windowId != null && windowId.intValue() == 0) {
-                        return;
-                    }
-                }
-                event.setCancelled(true);
-                PacketContainer container = event.getPacket().shallowClone();
-                CompletableFuture.runAsync(() -> {
-                    long packetSize = getPacketSize(container);
-                    PKT_TYPE_STATS.compute(event.getPacketType(), (k, v) -> {
-                        if (v == null) {
-                            v = new PacketInfo();
-                        }
-                        v.getPktCounter().increment();
-                        v.getPktSize().add(packetSize);
-                        return v;
-                    });
-                    if (!(event.getPlayer() instanceof TemporaryPlayer)) {
-                        PLAYER_PKT_SAVED_STATS.compute(event.getPlayer().getUniqueId(), (k, v) -> {
-                            if (v == null) {
-                                v = new PacketInfo();
-                            }
-                            v.getPktCounter().increment();
-                            v.getPktSize().add(packetSize);
-                            return v;
-                        });
-                    }
-                }, EXECUTOR_SERVICE);
-            }
-        });
+        listener = new PacketListener();
+        PacketEvents.getAPI().getEventManager().registerListener(listener);
     }
 
-    private long getPacketSize(PacketContainer packetContainer) {
+    private int calculatePacketSize(PacketSendEvent packet) {
+        if (packet == null) return 0;
         try {
-            ByteBuf buffer = (ByteBuf) packetContainer.serializeToBuffer();
-            if (buffer != null) {
-                long size = buffer.readableBytes();
-                ReferenceCountUtil.safeRelease(buffer);
-                return size;
-            } else {
-                return 0L;
-            }
+            ByteBuf byteBuf = (ByteBuf) packet.getByteBuf();
+            return byteBuf.readableBytes();
         } catch (Exception e) {
-            return -1L;
+            return 0;
         }
-
     }
 
     public void playerEcoEnable(Player player) {
@@ -226,6 +124,10 @@ public final class RIABandwidthSaver extends JavaPlugin implements Listener {
         }
     }
 
+    public boolean playerIsEco(Player player) {
+        return AFK_PLAYERS.contains(player.getUniqueId());
+    }
+
     @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
     public void onPlayerQuit(PlayerQuitEvent event) {
         playerEcoDisable(event.getPlayer());
@@ -236,13 +138,16 @@ public final class RIABandwidthSaver extends JavaPlugin implements Listener {
     @Override
     public void onDisable() {
         // Plugin shutdown logic
-        ProtocolLibrary.getProtocolManager().removePacketListeners(this);
+        if (listenerCale != null) {
+            PacketEvents.getAPI().getEventManager().unregisterListener(listenerCale);
+        }
+        if (listener != null) {
+            PacketEvents.getAPI().getEventManager().unregisterListener(listener);
+        }
     }
 
-
-
     @Override
-    public List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command command, @NotNull String label, @NotNull String[] args) {
+    public List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command command, @NotNull String label, @NotNull String @NonNull [] args) {
         if (args.length == 1) {
             return  List.of(
                     "reload",
@@ -253,16 +158,16 @@ public final class RIABandwidthSaver extends JavaPlugin implements Listener {
     }
 
     @Override
-    public boolean onCommand(@NotNull CommandSender sender, @NotNull Command command, @NotNull String label, @NotNull String[] args) {
+    public boolean onCommand(@NotNull CommandSender sender, @NotNull Command command, @NotNull String label, @NotNull String @NonNull [] args) {
         if (args.length == 0) {
             sender.sendMessage(ChatColor.GREEN + "🍃 ECO 节能模式 - 统计信息：");
             long pktCancelled = PKT_TYPE_STATS.values().stream().mapToLong(r -> r.getPktCounter().longValue()).sum();
             long pktSizeSaved = PKT_TYPE_STATS.values().stream().mapToLong(r -> r.getPktSize().longValue()).sum();
             sender.sendMessage(ChatColor.YELLOW + "共减少发送数据包：" + ChatColor.AQUA + pktCancelled + " 个");
             sender.sendMessage(ChatColor.YELLOW + "共减少发送数据包：" + ChatColor.AQUA + humanReadableByteCount(pktSizeSaved, false) + " （不包含视距优化的增益数据）");
-            Map<PacketType, PacketInfo> sortedPktMap = new LinkedHashMap<>();
+            Map<PacketType.Play.Server, PacketInfo> sortedPktMap = new LinkedHashMap<>();
             Map<UUID, PacketInfo> sortedPlayerMap = new LinkedHashMap<>();
-            PKT_TYPE_STATS.entrySet().stream().sorted(Map.Entry.<PacketType, PacketInfo>comparingByValue().reversed()).forEachOrdered(e -> sortedPktMap.put(e.getKey(), e.getValue()));
+            PKT_TYPE_STATS.entrySet().stream().sorted(Map.Entry.<PacketType.Play.Server, PacketInfo>comparingByValue().reversed()).forEachOrdered(e -> sortedPktMap.put(e.getKey(), e.getValue()));
             PLAYER_PKT_SAVED_STATS.entrySet().stream().sorted(Map.Entry.<UUID, PacketInfo>comparingByValue().reversed()).forEachOrdered(e -> sortedPlayerMap.put(e.getKey(), e.getValue()));
             sender.sendMessage(ChatColor.YELLOW + " -- 数据包类型节约 TOP 5 --");
             sortedPktMap.entrySet().stream().limit(5).forEach(entry -> sender.sendMessage(ChatColor.GRAY + entry.getKey().name() + " - " + humanReadableByteCount(entry.getValue().getPktSize().longValue(), false)));
@@ -275,9 +180,9 @@ public final class RIABandwidthSaver extends JavaPlugin implements Listener {
             long pktSize = UNFILTERED_PKT_TYPE_STATS.values().stream().mapToLong(r -> r.getPktSize().longValue()).sum();
             sender.sendMessage(ChatColor.YELLOW + "共发送数据包：" + ChatColor.AQUA + pktSent + " 个");
             sender.sendMessage(ChatColor.YELLOW + "共发送数据包：" + ChatColor.AQUA + humanReadableByteCount(pktSize, false));
-            Map<PacketType, PacketInfo> sortedPktMap = new LinkedHashMap<>();
+            Map<PacketType.Play.Server, PacketInfo> sortedPktMap = new LinkedHashMap<>();
             Map<UUID, PacketInfo> sortedPlayerMap = new LinkedHashMap<>();
-            UNFILTERED_PKT_TYPE_STATS.entrySet().stream().sorted(Map.Entry.<PacketType, PacketInfo>comparingByValue().reversed()).forEachOrdered(e -> sortedPktMap.put(e.getKey(), e.getValue()));
+            UNFILTERED_PKT_TYPE_STATS.entrySet().stream().sorted(Map.Entry.<PacketType.Play.Server, PacketInfo>comparingByValue().reversed()).forEachOrdered(e -> sortedPktMap.put(e.getKey(), e.getValue()));
             UNFILTERED_PLAYER_PKT_SAVED_STATS.entrySet().stream().sorted(Map.Entry.<UUID, PacketInfo>comparingByValue().reversed()).forEachOrdered(e -> sortedPlayerMap.put(e.getKey(), e.getValue()));
             sender.sendMessage(ChatColor.YELLOW + " -- 数据包类型 TOP 15 --");
             sortedPktMap.entrySet().stream().limit(15).forEach(entry -> sender.sendMessage(ChatColor.GRAY + entry.getKey().name() + " - " + humanReadableByteCount(entry.getValue().getPktSize().longValue(), false)));
@@ -297,5 +202,131 @@ public final class RIABandwidthSaver extends JavaPlugin implements Listener {
         int exp = (int) (Math.log(bytes) / Math.log(unit));
         String pre = (si ? "kMGTPE" : "KMGTPE").charAt(exp - 1) + (si ? "" : "i");
         return String.format("%.1f %sB", bytes / Math.pow(unit, exp), pre);
+    }
+
+    private class PacketCalcListener extends PacketListenerAbstract {
+
+        public PacketCalcListener() {
+            super(PacketListenerPriority.MONITOR);
+        }
+
+        @Override
+        public void onPacketSend(@NonNull PacketSendEvent event) {
+            if (!(event.getPacketType() instanceof PacketType.Play.Server packetType)) {
+                return;
+            }
+            User user = event.getUser();
+            int calculatedSize = calculatePacketSize(event);
+
+            CompletableFuture.runAsync(() -> {
+                UNFILTERED_PKT_TYPE_STATS.compute(packetType, (k, v) -> {
+                    if (v == null) {
+                        v = new PacketInfo();
+                    }
+                    v.getPktCounter().increment();
+                    v.getPktSize().add(calculatedSize);
+                    return v;
+                });
+
+                user.getUUID();
+                UNFILTERED_PLAYER_PKT_SAVED_STATS.compute(user.getUUID(), (k, v) -> {
+                    if (v == null) {
+                        v = new PacketInfo();
+                    }
+                    v.getPktCounter().increment();
+                    v.getPktSize().add(calculatedSize);
+                    return v;
+                });
+            }, EXECUTOR_SERVICE);
+        }
+    }
+
+    private class PacketListener extends PacketListenerAbstract {
+
+        private final List<PacketType.Play.Server> packets = List.of(
+                PacketType.Play.Server.ENTITY_ANIMATION,
+                PacketType.Play.Server.BLOCK_BREAK_ANIMATION,
+                PacketType.Play.Server.ENTITY_SOUND_EFFECT,
+                PacketType.Play.Server.NAMED_SOUND_EFFECT,
+                PacketType.Play.Server.PARTICLE,
+                PacketType.Play.Server.EXPLOSION,
+                PacketType.Play.Server.TIME_UPDATE,
+                PacketType.Play.Server.ENTITY_HEAD_LOOK,
+                PacketType.Play.Server.HURT_ANIMATION,
+                PacketType.Play.Server.DAMAGE_EVENT,
+                PacketType.Play.Server.ENTITY_RELATIVE_MOVE,
+                PacketType.Play.Server.ENTITY_RELATIVE_MOVE_AND_ROTATION,
+                PacketType.Play.Server.SPAWN_EXPERIENCE_ORB,
+                PacketType.Play.Server.VEHICLE_MOVE,
+                PacketType.Play.Server.BLOCK_ACTION,
+                PacketType.Play.Server.UPDATE_LIGHT,
+                PacketType.Play.Server.PLAYER_LIST_HEADER_AND_FOOTER,
+//                PacketType.Play.Server.WORLD_EVENT,
+                PacketType.Play.Server.COLLECT_ITEM,
+                PacketType.Play.Server.ENTITY_EFFECT
+        );
+
+        public PacketListener() {
+            super(PacketListenerPriority.HIGHEST);
+        }
+
+        @Override
+        public void onPacketSend(@NonNull PacketSendEvent event) {
+            User user = event.getUser();
+            UUID uuid = user.getUUID();
+
+            if (!AFK_PLAYERS.contains(uuid)) {
+                return;
+            }
+
+            if (!(event.getPacketType() instanceof PacketType.Play.Server type)) {
+                return;
+            }
+            if (!packets.contains(type)) {
+                return;
+            }
+
+            if (type == PacketType.Play.Server.ENTITY_RELATIVE_MOVE ||
+                    type == PacketType.Play.Server.VEHICLE_MOVE ||
+                    type == PacketType.Play.Server.ENTITY_RELATIVE_MOVE_AND_ROTATION ||
+                    type == PacketType.Play.Server.SPAWN_EXPERIENCE_ORB) {
+
+                if (RANDOM.nextInt(3) > 0) {
+                    return;
+                }
+            }
+
+            if (type == PacketType.Play.Server.SET_SLOT) {
+                WrapperPlayServerSetSlot wrapper = new WrapperPlayServerSetSlot(event);
+                int windowId = wrapper.getWindowId();
+
+                if (windowId == 0) {
+                    return;
+                }
+            }
+
+            event.setCancelled(true);
+
+            int packetSize = calculatePacketSize(event);
+            CompletableFuture.runAsync(() -> {
+                PKT_TYPE_STATS.compute(type, (k, v) -> {
+                    if (v == null) {
+                        v = new PacketInfo();
+                    }
+                    v.getPktCounter().increment();
+                    v.getPktSize().add(packetSize);
+                    return v;
+                });
+
+                PLAYER_PKT_SAVED_STATS.compute(uuid, (k, v) -> {
+                    if (v == null) {
+                        v = new PacketInfo();
+                    }
+                    v.getPktCounter().increment();
+                    v.getPktSize().add(packetSize);
+                    return v;
+                });
+            }, EXECUTOR_SERVICE);
+        }
     }
 }

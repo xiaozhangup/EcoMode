@@ -9,39 +9,29 @@ plugins {
 
 repositories {
     mavenLocal()
-    maven {
-        url = uri("https://repo.papermc.io/repository/maven-public/")
-    }
-
-    maven {
-        url = uri("https://oss.sonatype.org/content/groups/public/")
-    }
-
-    maven {
-        url = uri("https://repo.dmulloy2.net/repository/public/")
-    }
-
-    maven {
-        url = uri("https://repo.essentialsx.net/releases/")
-    }
-
-    maven {
-        url = uri("https://repo.maven.apache.org/maven2/")
-    }
+    mavenCentral()
+    maven("https://repo.papermc.io/repository/maven-public/")
+    maven("https://oss.sonatype.org/content/groups/public/")
+    maven("https://repo.essentialsx.net/releases/")
+    maven("https://repo.maven.apache.org/maven2/")
+    maven("https://repo.codemc.io/repository/maven-releases/")
+    maven("https://jitpack.io")
 }
 
 dependencies {
-    compileOnly(libs.io.papermc.paper.paper.api)
-    compileOnly(libs.com.comphenix.protocol.protocollib)
-    compileOnly(libs.io.netty.netty.all)
-    compileOnly(libs.net.essentialsx.essentialsx)
-    system(libs.cmi.cmi)
+    compileOnly("io.papermc.paper:paper-api:1.21.8-R0.1-SNAPSHOT")
+    compileOnly("com.github.retrooper:packetevents-spigot:2.11.1")
+    compileOnly("io.netty:netty-all:4.1.107.Final")
+    compileOnly("net.essentialsx:EssentialsX:2.21.2") {
+        exclude("org.spigotmc", "spigot-api")
+    }
+    compileOnly("com.github.Zrips:CMI-API:9.7.14.3")
 }
 
 group = "com.ghostchu.plugins"
-version = "1.2.2"
-description = "RIABandwidthSaver"
-java.sourceCompatibility = JavaVersion.VERSION_11
+version = "1.2.3"
+description = "EcoMode"
+java.sourceCompatibility = JavaVersion.VERSION_21
 
 publishing {
     publications.create<MavenPublication>("maven") {
